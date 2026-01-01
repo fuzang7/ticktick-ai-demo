@@ -38,3 +38,7 @@ htmlcov/
 *.tmp
 
 CLAUDE.md
+
+# 忽略 AI 生成的 Dashboard 报告
+TaskDashboard_*.md
+DailyReview_*.md

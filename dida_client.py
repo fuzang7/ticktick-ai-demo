@@ -287,6 +287,302 @@ class DidaClient:
             logger.error(f"Failed to delete task {task_id}: {e}")
             return False
 
+    def get_all_projects(self) -> List[Dict[str, Any]]:
+        """Retrieve all projects from TickTick.
+
+        Returns:
+            List of project dictionaries. Each project contains id, name, type, etc.
+
+        Raises:
+            requests.exceptions.RequestException: If API request fails.
+        """
+        url = f"{self.base_url}/project"
+        try:
+            response = self.session.get(url)
+            response.raise_for_status()
+            projects = response.json()
+
+            # Filter out system projects if needed
+            # Inbox typically has type "INBOX", other user projects have type "TASK"
+            logger.info(f"Retrieved {len(projects)} projects")
+            return projects
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to retrieve projects: {e}")
+            if hasattr(e.response, 'text'):
+                logger.debug(f"Response: {e.response.text}")
+            raise  # Re-raise to let caller handle
+
+    def get_project_tasks_batch(
+        self,
+        project_ids: List[str],
+        delay_between_requests: float = 0.5
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Retrieve tasks from multiple projects with rate limiting.
+
+        Args:
+            project_ids: List of project IDs to fetch tasks from
+            delay_between_requests: Delay in seconds between API requests to avoid rate limiting
+
+        Returns:
+            Dictionary mapping project_id to list of tasks in that project.
+
+        Note:
+            This method includes a delay between requests to respect API rate limits.
+        """
+        import time
+        from typing import Dict, List, Any
+
+        results: Dict[str, List[Dict[str, Any]]] = {}
+
+        for i, project_id in enumerate(project_ids):
+            try:
+                logger.debug(f"Fetching tasks for project {project_id} ({i+1}/{len(project_ids)})")
+                tasks = self.get_project_tasks(project_id)
+                results[project_id] = tasks
+
+                # Add delay between requests except for the last one
+                if i < len(project_ids) - 1:
+                    time.sleep(delay_between_requests)
+
+            except Exception as e:
+                logger.error(f"Failed to fetch tasks for project {project_id}: {e}")
+                results[project_id] = []  # Empty list for failed projects
+
+        logger.info(f"Fetched tasks from {len(results)} projects, total tasks: {sum(len(tasks) for tasks in results.values())}")
+        return results
+
+    def get_active_tasks_from_all_projects(self) -> Dict[str, Any]:
+        """Retrieve all active tasks across all projects.
+
+        Returns:
+            Dictionary containing:
+                - 'projects': List of all projects with metadata
+                - 'project_tasks': Dict mapping project_id to list of tasks
+                - 'all_tasks': Flattened list of all tasks across all projects
+                - 'project_map': Dict mapping project_id to project_name for easy lookup
+                - 'summary': Basic statistics about the tasks
+
+        Note:
+            This method performs multiple API calls and includes delays to avoid rate limiting.
+            It only returns tasks with status indicating they are not completed.
+        """
+        try:
+            # Step 1: Get all projects
+            logger.info("Fetching all projects...")
+            projects = self.get_all_projects()
+
+            if not projects:
+                logger.warning("No projects found")
+                return {
+                    'projects': [],
+                    'project_tasks': {},
+                    'all_tasks': [],
+                    'project_map': {},
+                    'summary': {'total_projects': 0, 'total_tasks': 0}
+                }
+
+            # Create project mapping (id -> name) for human-readable output
+            project_map = {p['id']: p.get('name', f"Project_{p['id'][:8]}") for p in projects}
+
+            # Step 2: Get tasks from all projects (with rate limiting)
+            logger.info(f"Fetching tasks from {len(projects)} projects...")
+            project_tasks = self.get_project_tasks_batch(
+                project_ids=list(project_map.keys()),
+                delay_between_requests=0.5  # 500ms between requests
+            )
+
+            # Step 3: Flatten all tasks and add project metadata
+            all_tasks = []
+            for project_id, tasks in project_tasks.items():
+                for task in tasks:
+                    # Add project name to each task for easier reference
+                    task_with_context = task.copy()
+                    task_with_context['project_name'] = project_map.get(project_id, 'Unknown')
+                    task_with_context['project_id'] = project_id
+                    all_tasks.append(task_with_context)
+
+            # Step 4: Filter for active tasks (not completed)
+            # TickTick task status: 0=Normal, 1=Archived, 2=Completed (varies by API version)
+            active_tasks = [
+                task for task in all_tasks
+                if task.get('status', 0) in [0, 1]  # Normal or Archived (not Completed)
+            ]
+
+            # Step 5: Create summary
+            summary = {
+                'total_projects': len(projects),
+                'total_tasks': len(all_tasks),
+                'active_tasks': len(active_tasks),
+                'completed_tasks': len(all_tasks) - len(active_tasks),
+                'projects_with_tasks': sum(1 for tasks in project_tasks.values() if tasks)
+            }
+
+            logger.info(
+                f"Dashboard data collected: {summary['active_tasks']} active tasks "
+                f"across {summary['projects_with_tasks']} projects"
+            )
+
+            return {
+                'projects': projects,
+                'project_tasks': project_tasks,
+                'all_tasks': all_tasks,
+                'active_tasks': active_tasks,
+                'project_map': project_map,
+                'summary': summary
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to collect dashboard data: {e}")
+            raise RuntimeError(f"Dashboard data collection failed: {e}")
+
+    def prepare_dashboard_data_for_llm(
+        self,
+        max_tasks: int = 50,
+        include_content: bool = True
+    ) -> Dict[str, Any]:
+        """Prepare task data for LLM analysis with token optimization.
+
+        Args:
+            max_tasks: Maximum number of tasks to include in the analysis.
+                       If there are more tasks, they will be summarized.
+            include_content: Whether to include task content/description.
+                           If False, only title, project, and metadata are included.
+
+        Returns:
+            Dictionary containing:
+                - 'summary': Basic statistics
+                - 'tasks': Simplified task data for LLM analysis
+                - 'projects': Project information
+                - 'analysis_ready': Whether data is ready for LLM analysis
+        """
+        try:
+            # Step 1: Collect all data
+            dashboard_data = self.get_active_tasks_from_all_projects()
+            active_tasks = dashboard_data['active_tasks']
+            project_map = dashboard_data['project_map']
+            summary = dashboard_data['summary']
+
+            if not active_tasks:
+                logger.warning("No active tasks found for analysis")
+                return {
+                    'summary': summary,
+                    'tasks': [],
+                    'projects': list(project_map.values()),
+                    'analysis_ready': False,
+                    'message': 'No active tasks to analyze'
+                }
+
+            # Step 2: Simplify task data for LLM consumption
+            simplified_tasks = []
+            for task in active_tasks[:max_tasks]:  # Limit to max_tasks
+                simplified_task = {
+                    'title': task.get('title', 'Untitled'),
+                    'project': project_map.get(task.get('project_id', ''), 'Unknown'),
+                    'priority': task.get('priority', 'Normal'),  # 0=None, 1=Low, 3=Medium, 5=High
+                    'due_date': task.get('dueDate'),
+                    'tags': task.get('tags', []),
+                    'status': task.get('status', 0),
+                }
+
+                # Only include content if requested and task count is manageable
+                if include_content and len(active_tasks) <= max_tasks:
+                    simplified_task['content'] = task.get('content', '')[:200]  # Limit content length
+
+                # Add additional useful fields if they exist
+                if 'startDate' in task:
+                    simplified_task['start_date'] = task['startDate']
+                if 'repeatFlag' in task:
+                    simplified_task['recurring'] = task['repeatFlag']
+
+                simplified_tasks.append(simplified_task)
+
+            # Step 3: Create analysis-ready data structure
+            analysis_data = {
+                'summary': {
+                    'total_active_tasks': summary['active_tasks'],
+                    'total_projects': summary['total_projects'],
+                    'projects_with_tasks': summary['projects_with_tasks'],
+                    'analysis_task_count': len(simplified_tasks),
+                    'has_more_tasks': len(active_tasks) > max_tasks
+                },
+                'tasks': simplified_tasks,
+                'projects': [
+                    {'id': pid, 'name': name}
+                    for pid, name in project_map.items()
+                ],
+                'analysis_ready': True
+            }
+
+            # Step 4: Add categorization hints
+            # Categorize tasks by priority
+            priority_counts = {'None': 0, 'Low': 0, 'Medium': 0, 'High': 0}
+            for task in simplified_tasks:
+                priority = task.get('priority', 'None')
+                if priority == 0:
+                    priority_counts['None'] += 1
+                elif priority == 1:
+                    priority_counts['Low'] += 1
+                elif priority == 3:
+                    priority_counts['Medium'] += 1
+                elif priority == 5:
+                    priority_counts['High'] += 1
+                else:
+                    priority_counts['None'] += 1
+
+            # Categorize by project
+            project_counts = {}
+            for task in simplified_tasks:
+                project = task.get('project', 'Unknown')
+                project_counts[project] = project_counts.get(project, 0) + 1
+
+            analysis_data['categorization'] = {
+                'by_priority': priority_counts,
+                'by_project': project_counts,
+                'projects_with_most_tasks': sorted(
+                    project_counts.items(),
+                    key=lambda x: x[1],
+                    reverse=True
+                )[:5]  # Top 5 projects by task count
+            }
+
+            # Step 5: Calculate overdue tasks
+            from datetime import datetime
+            today = datetime.now().date()
+            overdue_count = 0
+            near_deadline_count = 0
+
+            for task in simplified_tasks:
+                due_date_str = task.get('due_date')
+                if due_date_str:
+                    try:
+                        # Parse ISO 8601 date string
+                        due_date = datetime.fromisoformat(
+                            due_date_str.replace('Z', '+00:00')
+                        ).date()
+                        days_until_due = (due_date - today).days
+
+                        if days_until_due < 0:
+                            overdue_count += 1
+                        elif days_until_due <= 3:  # Due in next 3 days
+                            near_deadline_count += 1
+                    except (ValueError, AttributeError):
+                        continue  # Skip if date parsing fails
+
+            analysis_data['summary']['overdue_tasks'] = overdue_count
+            analysis_data['summary']['near_deadline_tasks'] = near_deadline_count
+
+            logger.info(
+                f"LLM analysis data prepared: {len(simplified_tasks)} tasks, "
+                f"{overdue_count} overdue, {priority_counts['High']} high priority"
+            )
+
+            return analysis_data
+
+        except Exception as e:
+            logger.error(f"Failed to prepare LLM analysis data: {e}")
+            raise RuntimeError(f"LLM data preparation failed: {e}")
+
 def main() -> None:
     """Example usage of the DidaClient."""
     try:

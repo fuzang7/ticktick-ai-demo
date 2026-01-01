@@ -232,6 +232,159 @@ class AIProjectManager:
             except Exception as e:
                 print(f"❌ Failed to save file: {e}")
 
+    def run_dashboard(self) -> None:
+        """Core function 3: Global task analysis and health dashboard.
+
+        This method:
+        1. Collects all active tasks across all projects
+        2. Analyzes task distribution, priorities, and due dates
+        3. Uses LLM to generate a comprehensive task management health report
+        4. Provides actionable insights and recommendations
+        """
+        print("\n" + "=" * 40)
+        print("📊 AI Global Dashboard")
+        print("=" * 40)
+
+        print("\n📡 Collecting task data from all projects...")
+        print("This may take a moment as we fetch data from all your projects.")
+
+        try:
+            # Step 1: Collect and prepare task data
+            dashboard_data = self.dida.prepare_dashboard_data_for_llm(
+                max_tasks=50,
+                include_content=False  # Exclude content for token efficiency
+            )
+
+            if not dashboard_data['analysis_ready']:
+                print(f"\n⚠️  {dashboard_data.get('message', 'No data available for analysis')}")
+                return
+
+            summary = dashboard_data['summary']
+            tasks = dashboard_data['tasks']
+            categorization = dashboard_data['categorization']
+
+            # Step 2: Display basic statistics
+            print(f"\n📊 Data Collection Complete:")
+            print(f"   • Total Active Tasks: {summary['total_active_tasks']}")
+            print(f"   • Projects Analyzed: {summary['projects_with_tasks']}")
+            print(f"   • Overdue Tasks: {summary.get('overdue_tasks', 0)}")
+            print(f"   • High Priority Tasks: {categorization['by_priority'].get('High', 0)}")
+
+            if summary['has_more_tasks']:
+                print(f"   • Note: Showing {summary['analysis_task_count']} of {summary['total_active_tasks']} tasks for analysis")
+
+            # Step 3: Prepare data for LLM analysis
+            print("\n🧠 Analyzing task management health with AI...")
+
+            # Build comprehensive prompt for LLM
+            prompt = self._build_dashboard_prompt(dashboard_data)
+
+            # Step 4: Generate analysis report
+            report = self.llm.chat(
+                prompt,
+                system_prompt=self._get_dashboard_system_prompt(),
+                temperature=0.4,  # Balanced for analytical tasks
+                max_tokens=4000    # Generous but limited for comprehensive analysis
+            )
+
+            # Step 5: Display the report
+            print("\n" + "=" * 60)
+            print("📋 TASK MANAGEMENT HEALTH REPORT")
+            print("=" * 60)
+            print(report)
+            print("=" * 60)
+
+            # Step 6: Offer to save report
+            save = input("\n❓ Save this report as Markdown file? (y/n): ").lower().strip()
+            if save == 'y':
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"TaskDashboard_{timestamp}.md"
+                try:
+                    with open(filename, "w", encoding="utf-8") as f:
+                        f.write("# Task Management Health Report\n\n")
+                        f.write(f"*Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n\n")
+                        f.write(report)
+                    print(f"✅ Report saved to: {filename}")
+                except Exception as e:
+                    print(f"❌ Failed to save report: {e}")
+
+        except Exception as e:
+            print(f"❌ Dashboard analysis failed: {e}")
+            self.logger.error(f"Dashboard error: {e}")
+
+    def _build_dashboard_prompt(self, dashboard_data: Dict[str, Any]) -> str:
+        """Build a comprehensive prompt for LLM task analysis.
+
+        Args:
+            dashboard_data: Prepared task data from DidaClient.
+
+        Returns:
+            Formatted prompt for LLM analysis.
+        """
+        summary = dashboard_data['summary']
+        tasks = dashboard_data['tasks']
+        categorization = dashboard_data['categorization']
+
+        # Format task list for the prompt
+        task_list = ""
+        for i, task in enumerate(tasks[:30], 1):  # Limit to 30 tasks in prompt
+            task_line = f"{i}. [{task['project']}] {task['title']}"
+            if task.get('due_date'):
+                task_line += f" (Due: {task['due_date']})"
+            if task.get('priority') in [3, 5]:  # Medium or High priority
+                task_line += " [Priority]"
+            if task.get('tags'):
+                task_line += f" [Tags: {', '.join(task['tags'])}]"
+            task_list += task_line + "\n"
+
+        # Build the prompt
+        prompt = f"""As a productivity and task management expert, analyze this user's task management situation and provide a comprehensive health report.
+
+TASK DATA SUMMARY:
+- Total Active Tasks: {summary['total_active_tasks']}
+- Overdue Tasks: {summary.get('overdue_tasks', 0)}
+- Near Deadline (within 3 days): {summary.get('near_deadline_tasks', 0)}
+- Priority Distribution: {categorization['by_priority']}
+- Top Projects by Task Count: {categorization['projects_with_most_tasks'][:3] if categorization['projects_with_most_tasks'] else 'None'}
+
+TASK LIST (subset of {len(tasks)} tasks):
+{task_list}
+
+Please provide a structured analysis with these sections:
+
+1. **OVERVIEW**: Overall assessment of task management health.
+2. **DISTRIBUTION ANALYSIS**: Where are tasks concentrated? (work/study/personal)
+3. **PRIORITY ASSESSMENT**: Are high-priority tasks being managed effectively?
+4. **TIMELINE HEALTH**: Are deadlines realistic? Any time management risks?
+5. **TAG PATTERNS**: How are tags being used? Any suggestions for better organization?
+6. **ACTIONABLE RECOMMENDATIONS**: 3-5 specific, practical suggestions.
+
+Focus on practical insights and avoid generic advice. Be specific about what you observe in the data."""
+
+        return prompt
+
+    def _get_dashboard_system_prompt(self) -> str:
+        """Get system prompt for dashboard analysis.
+
+        Returns:
+            System prompt defining the AI's role for dashboard analysis.
+        """
+        return """You are a highly experienced productivity coach and task management expert.
+You analyze task management systems to identify patterns, risks, and opportunities for improvement.
+
+Your analysis should be:
+1. DATA-DRIVEN: Base observations on the data provided
+2. PRACTICAL: Focus on actionable insights
+3. CONSTRUCTIVE: Identify both strengths and areas for improvement
+4. SPECIFIC: Avoid generic advice, be specific to the user's situation
+5. STRUCTURED: Use clear sections with markdown formatting
+
+You have expertise in:
+- Task prioritization methods (Eisenhower matrix, GTD)
+- Time management and deadline planning
+- Project organization and categorization
+- Stress-free productivity systems"""
+
     def start(self) -> None:
         """Start the main application loop.
 
@@ -244,6 +397,7 @@ class AIProjectManager:
             print("=" * 40)
             print("1. New Plan (Decompose goals -> TickTick)")
             print("2. Daily Review (Read tasks -> Generate report)")
+            print("3. AI Dashboard (Global task analysis)")
             print("q. Quit")
 
             choice = input("\nSelect function: ").strip().lower()
@@ -252,11 +406,13 @@ class AIProjectManager:
                 self.run_planner()
             elif choice == '2':
                 self.run_auditor()
+            elif choice == '3':
+                self.run_dashboard()
             elif choice == 'q':
                 print("\n👋 Goodbye!")
                 break
             else:
-                print("Invalid input. Please enter 1, 2, or q.")
+                print("Invalid input. Please enter 1, 2, 3, or q.")
 
 
 def main() -> None:
