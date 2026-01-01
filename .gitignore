@@ -1,0 +1,38 @@
+# 1. 忽略虚拟环境 (最重要，这能减少 2000+ 个文件)
+.venv/
+venv/
+env/
+
+# 2. 忽略机密文件 (绝对不能上传！安全第一！)
+.env
+.token-oauth
+
+# 3. 忽略 Python 缓存文件 (垃圾文件)
+__pycache__/
+*.pyc
+
+# 4. 忽略一些系统文件
+.DS_Store
+Thumbs.db
+
+# 5. 日志文件
+*.log
+logs/
+
+# 6. IDE配置文件
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 7. Python相关
+*.egg-info/
+dist/
+build/
+.coverage
+htmlcov/
+.pytest_cache/
+
+# 8. 操作系统文件
+*.bak
+*.tmp

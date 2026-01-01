@@ -1,0 +1,9 @@
+certifi==2025.11.12
+charset-normalizer==3.4.4
+idna==3.11
+python-dotenv==1.2.1
+pytz==2025.2
+regex==2025.11.3
+requests==2.32.5
+ticktick-py==2.0.3
+urllib3==2.6.2
