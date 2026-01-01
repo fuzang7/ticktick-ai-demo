@@ -4,6 +4,7 @@ import logging
 from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 from openai import OpenAI
+from datetime import datetime, timedelta
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -55,20 +56,22 @@ class LLMClient:
 
     def get_json_plan(self, goal: str, context: str = "") -> List[Dict[str, Any]]:
         """
-        【核心功能】任务拆解器
-        输入一个大目标，强制 AI 返回 JSON 格式的任务列表。
+        任务拆解器 (升级版：支持时间规划)
         """
         
-        # 精心设计的 Prompt，强制输出 JSON
         system_prompt = """
-        你是一名专业的项目经理。你的任务是将用户的目标拆解为具体的、可执行的子任务。
+        你是一名专业的项目经理。你的任务是将用户的目标拆解为具体的子任务，并规划执行时间。
         
         【重要规则】
-        1. 必须只返回合法的 JSON 格式。
-        2. 不要包含 markdown 标记（如 ```json），直接返回 JSON 字符串。
-        3. JSON 必须是一个包含 'tasks' 键的对象，'tasks' 是一个列表。
-        4. 每个任务必须包含 'title' (标题) 和 'content' (详细描述/执行建议)。
-        5. 任务数量控制在 3-7 个之间。
+        1. 返回合法的 JSON 格式。
+        2. JSON 必须包含 'tasks' 键，对应一个列表。
+        3. 每个任务包含：
+           - 'title': 任务标题 (动词开头，如"安装环境")
+           - 'content': 执行建议
+           - 'day_offset': 执行时间偏移量 (整数)。
+             0 表示今天，1 表示明天，2 表示后天，以此类推。
+        4. 任务数量 3-7 个。
+        5. 必须按执行顺序排列。
         """
         
         user_prompt = f"我的目标是：{goal}\n\n补充背景信息：{context}\n\n请帮我拆解。"

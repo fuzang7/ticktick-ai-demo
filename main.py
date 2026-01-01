@@ -1,5 +1,5 @@
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from dida_client import DidaClient
 from llm_client import LLMClient
 import logging
@@ -19,49 +19,81 @@ class AIProjectManager:
             sys.exit(1)
 
     def run_planner(self):
-        """核心功能 1: 目标拆解与规划"""
+        """核心功能 1: 目标拆解与规划 (父子任务 + 时间版)"""
         print("\n" + "="*40)
-        print("🎯 智能规划模式 (The Planner)")
+        print("🎯 智能规划模式 (Planner V2.0)")
         print("="*40)
         
         goal = input("\n请告诉我你的大目标 (例如: '一周内入门 Linux 驱动开发'):\n> ").strip()
         if not goal: return
 
-        print(f"\n🧠 正在思考如何拆解 '{goal}' ... (请稍候)")
+        print(f"\n🧠 正在思考如何拆解 '{goal}' ...")
         
-        # 1. 调用 AI 拆解
-        # 这里你可以把 context 换成更具体的信息，比如你现在的水平
-        tasks = self.llm.get_json_plan(goal, context="用户是 C 语言熟练工，偏好实战")
+        # 1. 调用 AI 拆解 (带时间规划)
+        tasks = self.llm.get_json_plan(goal, context="用户希望循序渐进")
         
         if not tasks:
             print("❌ AI 思考失败，请重试。")
             return
 
-        # 2. 展示方案供用户确认 (Human-in-the-loop)
-        print(f"\n📋 AI 建议拆解为 {len(tasks)} 个步骤:")
+        # 2. 展示方案
+        print(f"\n📋 AI 建议方案:")
+        print(f"   大目标: {goal}")
+        now = datetime.now()
+        
         for i, t in enumerate(tasks):
-            print(f"  [{i+1}] {t['title']}")
-            print(f"      └─ {t['content']}")
+            offset = t.get('day_offset', 0)
+            # 计算预计日期
+            plan_date = now + timedelta(days=offset)
+            date_str = plan_date.strftime("%m-%d")
+            print(f"   [{i+1}] {date_str} | {t['title']}")
+
+        confirm = input("\n❓ 是否执行写入？(y/n): ").lower()
         
-        confirm = input("\n❓ 是否将这些任务写入收集箱？(y/n): ").lower()
-        
-        # 3. 执行写入
         if confirm == 'y':
             print("\n🚀 正在写入滴答清单...")
+            
+            # --- 核心修改：先创建父任务 ---
+            parent_task = self.dida.create_task(
+                title=f"【项目】{goal}", # 加个前缀区分
+                content="由 AI 自动规划生成的项目任务组",
+                is_all_day=True,
+                due_date=now.strftime("%Y-%m-%dT00:00:00+0800") # 父任务设为今天开始
+            )
+            
+            if not parent_task:
+                print("❌ 父任务创建失败，流程终止。")
+                return
+            
+            parent_id = parent_task['id']
+            print(f"  ✅ 父任务已创建: {goal}")
+
+            # --- 循环创建子任务 ---
             success_count = 0
             for t in tasks:
-                # 调用 dida_client 创建任务
-                res = self.dida.create_task(title=t['title'], content=t['content'])
+                # 计算 ISO 8601 格式的日期字符串
+                offset = t.get('day_offset', 0)
+                due_dt = now + timedelta(days=offset)
+                # 格式示例: 2023-10-27T00:00:00+0800
+                due_date_str = due_dt.strftime("%Y-%m-%dT00:00:00+0800")
+                
+                res = self.dida.create_task(
+                    title=t['title'], 
+                    content=t['content'],
+                    parent_id=parent_id,    # <--- 关键：绑定父亲
+                    due_date=due_date_str,  # <--- 关键：设置时间
+                    is_all_day=True
+                )
+                
                 if res:
-                    print(f"  ✅ 已创建: {t['title']}")
+                    print(f"    └─ ✅ 子任务: {t['title']} ({due_dt.strftime('%m-%d')})")
                     success_count += 1
                 else:
-                    print(f"  ❌ 创建失败: {t['title']}")
+                    print(f"    └─ ❌ 失败: {t['title']}")
             
-            print(f"\n✨ 完成！成功创建 {success_count}/{len(tasks)} 个任务。")
-            print("💡 提示：你可以去手机 App 给它们安排具体日期了。")
+            print(f"\n✨ 完成！在滴答清单中创建了 1 个父任务和 {success_count} 个子任务。")
         else:
-            print("👌 已取消操作。")
+            print("👌 已取消。")
 
     def run_auditor(self):
         """核心功能 2: 每日复盘与日报生成"""

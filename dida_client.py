@@ -143,26 +143,20 @@ class DidaClient:
         except ValueError as e:
             logger.error(f"Failed to parse response JSON: {e}")
             return []
-
     def create_task(self, title: str, content: str = "",
-                    project_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+                    project_id: Optional[str] = None,
+                    parent_id: Optional[str] = None,
+                    due_date: Optional[str] = None,
+                    is_all_day: bool = True) -> Optional[Dict[str, Any]]:
         """Create a new task in TickTick.
 
         Args:
             title: Task title (required)
-            content: Task description or content (optional)
-            project_id: Project ID to create task in. If None, uses inbox_id.
-
-        Returns:
-            Dictionary containing created task data if successful, None otherwise.
-
-        Raises:
-            ValueError: If title is empty or required configuration missing.
-
-        Examples:
-            >>> client = DidaClient()
-            >>> task = client.create_task("Review project documentation", "Check the latest updates")
-            >>> print(f"Created task with ID: {task['id']}")
+            content: Task description (optional)
+            project_id: Project ID. If None, uses inbox_id.
+            parent_id: Parent Task ID (optional, for subtasks)
+            due_date: Due date string (e.g., "2023-10-01T00:00:00+0800").
+            is_all_day: Whether it's an all-day task (default True).
         """
         if not title.strip():
             raise ValueError("Task title cannot be empty")
@@ -170,23 +164,32 @@ class DidaClient:
         target_project_id = project_id or self.inbox_id
         if not target_project_id:
             logger.warning("No project ID specified and inbox_id not configured")
-            # Create in default location if available
-            # For now, return None - could be extended to create in default location
             return None
 
         url = f"{self.base_url}/task"
+        
+        # 基础 Payload
         payload = {
             "title": title.strip(),
             "content": content.strip(),
-            "projectId": target_project_id
+            "projectId": target_project_id,
+            "isAllDay": is_all_day
         }
+
+        # 1. 支持子任务
+        if parent_id:
+            payload["parentId"] = parent_id
+
+        # 2. 支持时间 (格式需符合 ISO 8601，如 2023-01-01T00:00:00+0000)
+        if due_date:
+            payload["dueDate"] = due_date
+            payload["timeZone"] = "Asia/Shanghai" # 建议固定时区或从配置读取
 
         try:
             response = self.session.post(url, json=payload)
             response.raise_for_status()
-
             task_data = response.json()
-            logger.info(f"Task created successfully: {title}")
+            logger.info(f"Task created: {title} (ID: {task_data.get('id')})")
             return task_data
 
         except requests.exceptions.RequestException as e:
