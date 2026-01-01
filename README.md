@@ -4,6 +4,9 @@ A Python client library for interacting with the TickTick (Dida365) API, designe
 
 ## Features
 
+- **AI-Powered Planning**: Decompose goals into actionable tasks using LLMs
+- **Smart Task Scheduling**: Automatic time planning with parent-child relationships
+- **Daily Review Generation**: AI-assisted progress reports and insights
 - **OAuth2 Authentication**: Full OAuth2 flow implementation for secure API access
 - **Task Management**: Create, read, update, and delete tasks
 - **Inbox Operations**: Specialized methods for inbox task management
@@ -29,6 +32,7 @@ pip install -r requirements.txt
 - `requests`: HTTP client library
 - `python-dotenv`: Environment variable management
 - `ticktick-py`: TickTick API wrapper (used for token refresh)
+- `openai`: OpenAI SDK (compatible with DeepSeek and other LLM providers)
 - `certifi`: SSL certificates
 
 ## Quick Start
@@ -52,6 +56,9 @@ TICKTICK_REDIRECT_URI=http://localhost:8080/callback
 
 # Optional: Inbox ID for inbox-specific operations
 TICKTICK_INBOX_ID=your_inbox_id_here
+
+# Required for AI features: DeepSeek API key
+DEEPSEEK_API_KEY=your_deepseek_api_key_here
 ```
 
 ### 3. Authenticate with TickTick
@@ -64,26 +71,49 @@ python refresh_token.py
 
 Follow the instructions in the terminal to complete the OAuth2 flow.
 
-### 4. Use the client
+### 4. Run the main application
+
+```bash
+python main.py
+```
+
+This will start the AI Project Manager with the following menu:
+```
+🎯 AI Personal Project Manager
+========================================
+1. New Plan (Decompose goals -> TickTick)
+2. Daily Review (Read tasks -> Generate report)
+q. Quit
+```
+
+### 5. Basic client usage examples
 
 ```python
 from dida_client import DidaClient
+from llm_client import LLMClient
 
-# Initialize client (reads from environment variables)
-client = DidaClient()
+# Initialize clients
+dida = DidaClient()
+llm = LLMClient()
 
-# Get inbox tasks
-tasks = client.get_inbox_tasks()
-for task in tasks[:5]:
-    print(f"Task: {task['title']}")
+# Example 1: Get inbox tasks
+tasks = dida.get_inbox_tasks()
+print(f"You have {len(tasks)} tasks in your inbox")
 
-# Create a new task
-new_task = client.create_task(
-    "Review project documentation",
-    "Check the latest updates before the meeting"
+# Example 2: Use AI for task planning
+goal = "Learn Python web scraping in one week"
+ai_tasks = llm.generate_task_plan(goal, num_tasks=5)
+for i, task in enumerate(ai_tasks, 1):
+    print(f"Day {task['day_offset']}: {task['title']}")
+
+# Example 3: Create tasks in TickTick
+parent_task = dida.create_task(
+    title=f"[Project] {goal}",
+    content="AI-generated project plan",
+    due_date="2024-12-31T00:00:00+08:00"
 )
-if new_task:
-    print(f"Created task with ID: {new_task['id']}")
+if parent_task:
+    print(f"Created parent task: {parent_task['id']}")
 ```
 
 ## API Reference

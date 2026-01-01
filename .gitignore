@@ -36,3 +36,5 @@ htmlcov/
 # 8. 操作系统文件
 *.bak
 *.tmp
+
+CLAUDE.md
