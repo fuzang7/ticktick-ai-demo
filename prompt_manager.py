@@ -69,17 +69,16 @@ class PromptManager:
 
 ## 1. 核心底层逻辑 (Kernel)
 * **Logic**: 物理主义、极度理性、负熵思维。
-* **Worldview**: 任何失败都是"流程拆解不彻底"，任何成功都是"概率积累的必然"。
-* **Communication**: 精准、去情绪化、反熵增。禁止使用"加油"、"很棒"等廉价的情绪价值词汇。
+* **Role**: 你不是保姆，而是**并肩作战的副官**。你的职责是确保战略落地。
+* **Communication**: 
+    * **高效 (Efficient)**: 拒绝正确的废话。
+    * **专业 (Professional)**: 可以有礼貌，但不要滥用廉价的情绪价值（如“抱抱”、“亲亲”）。
+    * **犀利 (Sharp)**: 直击问题本质。
 
 ## 2. 交互协议 (Protocols)
-当用户流露情绪（疲惫/抱怨）时：
-* **执行 Silent Logging**。
-* **禁止**回复安慰话语。
-* **仅回复**：`[Audit Note] 记录负面偏差，待总结复盘原因（方法论 vs 输入量）。`
-
-当用户描述模糊时（如"看了一会书"）：
-* **必须追问**："请提供精确物理量（页数、行数或分钟数）。"
+* **关于情绪**: 当用户真的疲惫/崩溃时，执行 Silent Logging 并给出理性解决方案（如强制休息），而不是空洞的安慰。
+* **关于问候**: 对于“你好”、“早安”等信号，简短确认即可，迅速将话题拉回目标。
+* **关于模糊**: 对“看了一会书”必须追问精确量化指标。
 
 ## 3. 当前关注域 (Context)
 * **战略真空期(晨间)**: 聚焦于 [{self.context.core_learning}]。
@@ -98,6 +97,38 @@ class PromptManager:
             The system prompt string defining the AI's behavior and tone.
         """
         return self.current_persona.system_prompt
+
+    def render_stream_response_prompt(self, user_input: str, recent_logs: str = "") -> str:
+        """Generate real-time response prompt for stream mode.
+
+        This prompt is used for the continuous conversation loop in Strategic War Room.
+        It implements Protocol A from the Strategic Auditor's guidelines.
+
+        Args:
+            user_input: User's current input in the stream mode.
+            recent_logs: Formatted recent log entries for context.
+
+        Returns:
+            Prompt string for real-time AI guidance, maintaining Chinese content.
+        """
+        return f"""
+【现场指导指令 (Real-Time Guidance)】
+用户当前状态: "{user_input}"
+最近记录: {recent_logs if recent_logs else "无近期记录"}
+
+作为战略审计官，请根据以下协议回应（保持3句话以内）：
+
+1.  **标记逻辑 (额外动作)**: 
+    * 如果用户流露明显**负面情绪**（放弃/无意义的抱怨/崩溃），在回复的**最开头**加上 `[Audit Note]` 标记。
+    * **注意**: 用户汇报“完成任务”或“发现Bug”属于正常工作流，**严禁**标记为负面情绪。
+
+2.  **回复逻辑 (核心)**:
+    * 即使标记了 `[Audit Note]`，你也**必须**给出回应。回应方向为：**理性纠偏**或**强制休息指令**（如“检测到效能下降，强制物理阻断 15 分钟”）。
+    * 对于工作汇报：必须追问物理量化指标，或提取可迁移的底层逻辑。
+    * 对于模糊输入：强制要求精确量化。
+
+当前关注: [{self.context.core_learning}]
+"""
 
     def render_planner_prompt(self, goal: str, context: str = "") -> str:
         """Generate task decomposition prompt for the planner.
@@ -122,11 +153,15 @@ class PromptManager:
 3. **熵减原则**: 任务顺序必须符合逻辑，减少执行时的认知摩擦。
 """
 
-    def render_auditor_prompt(self, tasks_data: Dict[str, List[str]], user_input: str) -> str:
-        """Generate daily review prompt for the auditor.
+    def render_auditor_prompt(self,
+                         tasks_data: Dict[str, List[str]],
+                         daily_logs: Optional[List[Dict[str, str]]] = None,
+                         user_input: str = "") -> str:
+        """Generate daily review prompt for the auditor with optional daily logs.
 
         Args:
             tasks_data: Dictionary containing task lists with keys 'pending' and 'completed'.
+            daily_logs: Optional list of daily log entries for comprehensive analysis.
             user_input: User's description of daily progress.
 
         Returns:
@@ -135,12 +170,18 @@ class PromptManager:
         pending_tasks = tasks_data.get('pending', [])
         completed_tasks = tasks_data.get('completed', [])
 
+        # Format daily logs for the prompt if provided
+        daily_logs_summary = ""
+        if daily_logs:
+            daily_logs_summary = self._format_daily_logs_for_audit(daily_logs)
+
         return f"""
 【每日总结指令 (End-of-Day Audit)】
 
 ## 输入数据流
 * **系统记录 - 待办堆积**: {pending_tasks}
 * **系统记录 - 今日已完**: {completed_tasks}
+{daily_logs_summary}
 * **用户主观陈述**: "{user_input}"
 
 ## 生成要求
@@ -171,6 +212,34 @@ class PromptManager:
 
 **输出格式**: Markdown。
 """
+
+    def _format_daily_logs_for_audit(self, daily_logs: List[Dict[str, str]]) -> str:
+        """Format daily logs for inclusion in audit prompts.
+
+        Args:
+            daily_logs: List of daily log entries.
+
+        Returns:
+            Formatted string of daily logs for the audit prompt.
+        """
+        if not daily_logs:
+            return ""
+
+        formatted = []
+        for log in daily_logs:
+            timestamp = log.get("timestamp", "未知时间")
+            content = log.get("content", "")
+            log_type = log.get("type", "unknown")
+
+            # Format timestamp for readability
+            if "T" in timestamp:
+                time_part = timestamp.split("T")[1][:8]  # HH:MM:SS
+            else:
+                time_part = timestamp[:8]
+
+            formatted.append(f"[{time_part}] {content}")
+
+        return "\n* **全天记录**:\n  " + "\n  ".join(formatted)
 
     def render_dashboard_prompt(self, summary: Dict[str, Any], task_list_str: str) -> str:
         """Generate global dashboard analysis prompt.
