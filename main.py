@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from dida_client import DidaClient
 from llm_client import LLMClient
-
+from prompt_manager import PromptManager
 
 class AIProjectManager:
     """Main application that integrates TickTick task management with AI planning.
@@ -22,6 +22,7 @@ class AIProjectManager:
     Attributes:
         dida (DidaClient): TickTick API client
         llm (LLMClient): LLM client for AI planning and analysis
+        pm (PromptManager): Centralized prompt manager for AI personas and templates
     """
 
     def __init__(self):
@@ -38,6 +39,7 @@ class AIProjectManager:
         try:
             self.dida = DidaClient()
             self.llm = LLMClient()
+            self.pm = PromptManager()
             print("✅ System ready! Connected to TickTick & LLM")
         except ValueError as e:
             print(f"❌ Configuration error: {e}")
@@ -71,10 +73,9 @@ class AIProjectManager:
 
         # 1. Use AI for task decomposition with time planning
         try:
-            tasks = self.llm.generate_task_plan(
+            tasks = self._generate_task_plan_with_pm(
                 goal,
                 context="User wants a gradual, step-by-step approach",
-                num_tasks=5,  # Default to 5 tasks for reasonable decomposition
                 temperature=0.3  # Low creativity for consistent planning
             )
         except Exception as e:
@@ -186,28 +187,22 @@ class AIProjectManager:
             print("No progress description provided.")
             return
 
-        # Build prompt for LLM
-        prompt = f"""
-        The user currently has the following tasks pending in their TickTick inbox:
-        {task_titles}
+        # Prepare task data for prompt_manager
+        # Note: We currently only have pending tasks, so completed is empty
+        tasks_data = {
+            "completed": [],  # TickTick API typically only returns incomplete tasks
+            "pending": task_titles
+        }
 
-        The user's description of today's progress:
-        "{user_input}"
-
-        Please act as an insightful review coach and generate a brief daily report.
-        Requirements:
-        1. Format in Markdown.
-        2. Include these sections: [Today's Achievements], [Challenges Encountered], [Suggestions for Tomorrow].
-        3. Tone should be rational, objective, and encouraging.
-        4. Keep it concise (3-5 paragraphs total).
-        """
-
+        # Generate prompt using prompt_manager
         print("\n🧠 Generating daily report...")
         try:
+            user_prompt = self.pm.render_auditor_prompt(tasks_data, user_input)
+            system_prompt = self.pm.get_system_prompt()
+
             report = self.llm.chat(
-                prompt,
-                system_prompt="You are an insightful productivity coach who helps "
-                            "users reflect on their daily progress and plan for tomorrow.",
+                user_prompt,
+                system_prompt=system_prompt,
                 temperature=0.5,  # Balanced creativity for insightful but consistent reports
                 max_tokens=500   # Limit length for concise reports
             )
@@ -276,13 +271,23 @@ class AIProjectManager:
             # Step 3: Prepare data for LLM analysis
             print("\n🧠 Analyzing task management health with AI...")
 
-            # Build comprehensive prompt for LLM
-            prompt = self._build_dashboard_prompt(dashboard_data)
+            # Extract and format task list for prompt_manager
+            task_list_str = self._format_task_list_for_dashboard(tasks)
+
+            # Prepare summary for prompt_manager (add missing fields if needed)
+            # prompt_manager expects 'high_priority_count' in summary
+            summary_for_pm = summary.copy()  # Create a copy to avoid modifying the original
+            if 'high_priority_count' not in summary_for_pm:
+                # Add high priority count from categorization
+                summary_for_pm['high_priority_count'] = categorization['by_priority'].get('High', 0)
+
+            # Generate prompt using prompt_manager
+            prompt = self.pm.render_dashboard_prompt(summary_for_pm, task_list_str)
 
             # Step 4: Generate analysis report
             report = self.llm.chat(
                 prompt,
-                system_prompt=self._get_dashboard_system_prompt(),
+                system_prompt=self.pm.get_system_prompt(),
                 temperature=0.4,  # Balanced for analytical tasks
                 max_tokens=4000    # Generous but limited for comprehensive analysis
             )
@@ -312,21 +317,21 @@ class AIProjectManager:
             print(f"❌ Dashboard analysis failed: {e}")
             self.logger.error(f"Dashboard error: {e}")
 
-    def _build_dashboard_prompt(self, dashboard_data: Dict[str, Any]) -> str:
-        """Build a comprehensive prompt for LLM task analysis.
+    
+    
+    def _format_task_list_for_dashboard(self, tasks: List[Dict[str, Any]]) -> str:
+        """Format task list for dashboard prompt.
+
+        Formats tasks into a readable string similar to the original
+        _build_dashboard_prompt's formatting.
 
         Args:
-            dashboard_data: Prepared task data from DidaClient.
+            tasks: List of task dictionaries from DidaClient.
 
         Returns:
-            Formatted prompt for LLM analysis.
+            Formatted task list string.
         """
-        summary = dashboard_data['summary']
-        tasks = dashboard_data['tasks']
-        categorization = dashboard_data['categorization']
-
-        # Format task list for the prompt
-        task_list = ""
+        task_list_str = ""
         for i, task in enumerate(tasks[:30], 1):  # Limit to 30 tasks in prompt
             task_line = f"{i}. [{task['project']}] {task['title']}"
             if task.get('due_date'):
@@ -335,55 +340,82 @@ class AIProjectManager:
                 task_line += " [Priority]"
             if task.get('tags'):
                 task_line += f" [Tags: {', '.join(task['tags'])}]"
-            task_list += task_line + "\n"
+            task_list_str += task_line + "\n"
 
-        # Build the prompt
-        prompt = f"""As a productivity and task management expert, analyze this user's task management situation and provide a comprehensive health report.
+        return task_list_str
 
-TASK DATA SUMMARY:
-- Total Active Tasks: {summary['total_active_tasks']}
-- Overdue Tasks: {summary.get('overdue_tasks', 0)}
-- Near Deadline (within 3 days): {summary.get('near_deadline_tasks', 0)}
-- Priority Distribution: {categorization['by_priority']}
-- Top Projects by Task Count: {categorization['projects_with_most_tasks'][:3] if categorization['projects_with_most_tasks'] else 'None'}
+    def _generate_task_plan_with_pm(self, goal: str, context: str = "", temperature: float = 0.3) -> List[Dict[str, Any]]:
+        """Generate task plan using prompt_manager.
 
-TASK LIST (subset of {len(tasks)} tasks):
-{task_list}
+        Uses prompt_manager to generate prompts and parses the LLM response.
 
-Please provide a structured analysis with these sections:
-
-1. **OVERVIEW**: Overall assessment of task management health.
-2. **DISTRIBUTION ANALYSIS**: Where are tasks concentrated? (work/study/personal)
-3. **PRIORITY ASSESSMENT**: Are high-priority tasks being managed effectively?
-4. **TIMELINE HEALTH**: Are deadlines realistic? Any time management risks?
-5. **TAG PATTERNS**: How are tags being used? Any suggestions for better organization?
-6. **ACTIONABLE RECOMMENDATIONS**: 3-5 specific, practical suggestions.
-
-Focus on practical insights and avoid generic advice. Be specific about what you observe in the data."""
-
-        return prompt
-
-    def _get_dashboard_system_prompt(self) -> str:
-        """Get system prompt for dashboard analysis.
+        Args:
+            goal: The main goal/objective to decompose
+            context: Additional context or constraints
+            temperature: Creativity level for plan generation.
 
         Returns:
-            System prompt defining the AI's role for dashboard analysis.
+            List of task dictionaries with title, content, and day_offset.
+
+        Raises:
+            RuntimeError: If LLM call fails or returns invalid JSON.
         """
-        return """You are a highly experienced productivity coach and task management expert.
-You analyze task management systems to identify patterns, risks, and opportunities for improvement.
+        try:
+            # Generate prompts using prompt_manager
+            user_prompt = self.pm.render_planner_prompt(goal, context)
+            system_prompt = self.pm.get_system_prompt()
 
-Your analysis should be:
-1. DATA-DRIVEN: Base observations on the data provided
-2. PRACTICAL: Focus on actionable insights
-3. CONSTRUCTIVE: Identify both strengths and areas for improvement
-4. SPECIFIC: Avoid generic advice, be specific to the user's situation
-5. STRUCTURED: Use clear sections with markdown formatting
+            # Call LLM with JSON response format
+            response = self.llm.client.chat.completions.create(
+                model=self.llm.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=temperature,
+                response_format={"type": "json_object"}
+            )
 
-You have expertise in:
-- Task prioritization methods (Eisenhower matrix, GTD)
-- Time management and deadline planning
-- Project organization and categorization
-- Stress-free productivity systems"""
+            content = response.choices[0].message.content.strip()
+            self.logger.debug(f"LLM raw response: {content[:200]}...")
+
+            # Parse JSON response
+            import json
+            data = json.loads(content)
+
+            # Validate response structure
+            if not isinstance(data, dict):
+                raise json.JSONDecodeError("Expected JSON object at top level", content, 0)
+
+            tasks = data.get("tasks", [])
+            if not isinstance(tasks, list):
+                raise json.JSONDecodeError("'tasks' should be a list", content, 0)
+
+            # Validate each task structure
+            validated_tasks = []
+            for i, task in enumerate(tasks):
+                if not isinstance(task, dict):
+                    self.logger.warning(f"Task {i} is not a dictionary, skipping")
+                    continue
+
+                # Ensure required fields
+                if "title" not in task or not task["title"]:
+                    self.logger.warning(f"Task {i} missing title, skipping")
+                    continue
+
+                # Set defaults for optional fields
+                validated_task = {
+                    "title": str(task.get("title", "")).strip(),
+                    "content": str(task.get("content", "")).strip(),
+                    "day_offset": int(task.get("day_offset", 0))
+                }
+                validated_tasks.append(validated_task)
+
+            return validated_tasks
+
+        except Exception as e:
+            self.logger.error(f"Failed to generate task plan with prompt_manager: {e}")
+            raise RuntimeError(f"LLM task planning failed: {e}")
 
     def start(self) -> None:
         """Start the main application loop.
