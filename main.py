@@ -975,6 +975,60 @@ class AIProjectManager:
             else:
                 print("无效输入，请输入 1, 2, 3, 4 或 0")
 
+    def process_wechat_message(self, user_id: str, content: str) -> str:
+        """处理来自微信的消息，返回 AI 的回复。
+        
+        Args:
+            user_id: 微信用户ID (用来区分不同用户的 Context，如果只是自己用可以忽略)
+            content: 用户发送的文本
+            
+        Returns:
+            AI 的回复文本
+        """
+        # 1. 记录用户输入 (利用现有的 LogManager)
+        # 可以在 Log 中增加一个 source 字段标记来源是 WeChat
+        self.log_manager.add_log_entry("user_input", content)
+        
+        # 2. 特殊命令拦截 (/done, /review 等)
+        if content.startswith("/done"):
+            self._process_done_command(content)
+            return f"✅ 已记录完成: {content[5:].strip()}"
+        elif content in ["/review", "/总结今天"]:
+            # 这里需要改造 _trigger_daily_review 让它返回字符串而不是直接打印
+            report = self._generate_review_text_only() 
+            return report
+
+        # 3. 正常的流式对话逻辑 (复用现有的 Prompt 逻辑)
+        recent_logs = self.log_manager.format_logs_for_prompt(limit=5)
+        
+        try:
+            prompt = self.pm.render_stream_response_prompt(content, recent_logs)
+            ai_response = self.llm.chat(
+                prompt,
+                system_prompt=self.pm.get_system_prompt(),
+                temperature=0.4,
+                max_tokens=300
+            )
+            
+            # 记录 AI 回复
+            self.log_manager.add_log_entry("ai_response", ai_response)
+            
+            # 处理 [Audit Note] 标签，使其适合微信显示
+            if "[Audit Note]" in ai_response:
+                clean_response = ai_response.replace("[Audit Note]", "").strip()
+                return f"⚠️ [系统标记] 负面情绪已归档\n----------------\n{clean_response}"
+            
+            return ai_response
+
+        except Exception as e:
+            self.logger.error(f"WeChat process error: {e}")
+            return f"❌ 系统错误: {str(e)}"
+
+    def _generate_review_text_only(self) -> str:
+        """辅助方法：生成复盘报告并返回字符串，而不是打印"""
+        # ... 把原 _trigger_daily_review 的逻辑复制过来，把 print 改成 return ...
+        # 核心是调用 LLM 生成 report，保存文件，然后 return report
+        pass
 
 def main() -> None:
     """Main entry point for the AI Project Manager application."""
