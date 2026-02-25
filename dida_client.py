@@ -6,10 +6,17 @@ specifically designed for AI-powered task management applications.
 
 import os
 import logging
+import json
+import time
 from typing import Optional, Dict, List, Any
 import requests
 from dotenv import load_dotenv
-from ticktick.oauth2 import OAuth2
+
+
+class OAuth2CN:
+    """国内版 OAuth2 (dida365.com) - 仅用于 token 类型定义"""
+    OAUTH_AUTHORIZE_URL = "https://dida365.com/oauth/authorize"
+    OBTAIN_TOKEN_URL = "https://dida365.com/oauth/token"
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -45,7 +52,8 @@ class DidaClient:
         redirect_uri: Optional[str] = None,
         inbox_id: Optional[str] = None,
         base_url: Optional[str] = None,
-        token_file: Optional[str] = None
+        token_file: Optional[str] = None,
+        headless: bool = True
     ):
         """Initialize the DidaClient.
 
@@ -56,9 +64,12 @@ class DidaClient:
             inbox_id: Inbox project ID. If not provided, reads from TICKTICK_INBOX_ID env var.
             base_url: API base URL. Defaults to https://api.dida365.com/open/v1.
             token_file: Path to token file. Defaults to .token-oauth.
+            headless: If True (default), only use token file without interactive auth. 
+                      When token is expired/invalid and headless=True, raise RuntimeError instead of opening browser.
         """
         self.base_url = base_url or self.DEFAULT_BASE_URL
         self.token_file = token_file or self.DEFAULT_TOKEN_FILE
+        self.headless = headless
 
         # Get credentials from environment if not provided
         self.client_id = client_id or os.getenv("TICKTICK_CLIENT_ID", "").strip()
@@ -74,11 +85,11 @@ class DidaClient:
         self._load_token()
 
     def _load_token(self) -> None:
-        """Load and refresh OAuth2 token.
+        """Load token from file directly without interactive authentication.
 
         Raises:
             FileNotFoundError: If token file doesn't exist.
-            ValueError: If token cannot be loaded.
+            RuntimeError: If token is expired or invalid and headless mode is enabled.
         """
         if not os.path.exists(self.token_file):
             error_msg = f"Token file not found: {self.token_file}. Please run authentication script first."
@@ -86,19 +97,33 @@ class DidaClient:
             raise FileNotFoundError(error_msg)
 
         try:
-            # Use ticktick library to handle token refresh
-            oauth = OAuth2(
-                client_id=self.client_id,
-                client_secret=self.client_secret,
-                redirect_uri=self.redirect_uri
-            )
+            # Read token directly from file
+            with open(self.token_file, 'r') as f:
+                token_info = json.load(f)
 
-            # Get access token
-            raw_token = oauth.get_access_token()
-            token = raw_token.get("access_token") if isinstance(raw_token, dict) else str(raw_token)
+            # Check if token is expired
+            expire_time = token_info.get('expire_time') or token_info.get('expires_at')
+            if expire_time:
+                current_time = int(time.time())
+                if current_time >= expire_time:
+                    if self.headless:
+                        # In headless mode, raise error instead of trying to refresh
+                        raise RuntimeError(
+                            "Token expired or invalid. Manual interactive authentication required via terminal."
+                        )
+                    else:
+                        # Try to refresh token (non-headless mode - not recommended for MCP)
+                        logger.warning("Token expired, attempting to refresh...")
+                        token_info = self._refresh_token(token_info)
+                        if not token_info:
+                            raise RuntimeError(
+                                "Token expired or invalid. Manual interactive authentication required via terminal."
+                            )
 
+            # Extract access token
+            token = token_info.get('access_token')
             if not token:
-                raise ValueError("Failed to extract access token")
+                raise ValueError("Failed to extract access token from token file")
 
             # Update session headers
             self.session.headers.update({
@@ -109,9 +134,61 @@ class DidaClient:
 
             logger.info("Token loaded successfully")
 
+        except RuntimeError:
+            # Re-raise RuntimeError (including our custom one)
+            raise
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse token file: {e}")
+            raise ValueError(f"Token file is not valid JSON: {e}")
         except Exception as e:
             logger.error(f"Failed to load token: {e}")
             raise ValueError(f"Token loading failed: {e}")
+
+    def _refresh_token(self, token_info: dict) -> Optional[dict]:
+        """Attempt to refresh the access token using refresh_token.
+
+        Note: This method is only used in non-headless mode.
+
+        Args:
+            token_info: The current token information dictionary.
+
+        Returns:
+            New token info if refresh successful, None otherwise.
+        """
+        refresh_token = token_info.get('refresh_token')
+        if not refresh_token:
+            logger.warning("No refresh_token available")
+            return None
+
+        try:
+            # Note: TickTick API may not support refresh_token grant
+            # This is a placeholder - actual implementation depends on API support
+            url = "https://dida365.com/oauth/token"
+            payload = {
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token"
+            }
+
+            response = self.session.post(url, json=payload)
+            if response.status_code == 200:
+                new_token_info = response.json()
+                new_token_info['expire_time'] = int(time.time()) + new_token_info.get('expires_in', 0)
+                
+                # Save to cache file
+                with open(self.token_file, 'w') as f:
+                    json.dump(new_token_info, f)
+                
+                logger.info("Token refreshed successfully")
+                return new_token_info
+            else:
+                logger.error(f"Token refresh failed: {response.status_code}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Token refresh error: {e}")
+            return None
 
     def get_inbox_tasks(self) -> List[Dict[str, Any]]:
         """Retrieve all tasks from the inbox.
@@ -151,7 +228,8 @@ class DidaClient:
         parent_id: Optional[str] = None,
         due_date: Optional[str] = None,
         time_zone: Optional[str] = None,
-        is_all_day: bool = True
+        is_all_day: bool = True,
+        start_date: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """Create a new task in TickTick.
 
@@ -164,6 +242,7 @@ class DidaClient:
             time_zone: Time zone for the due date (e.g., "Asia/Shanghai").
                       If None and due_date provided, defaults to "Asia/Shanghai".
             is_all_day: Whether the task is all-day (default True).
+            start_date: Start time in ISO 8601 format (e.g., "2023-10-01T09:00:00+08:00")
 
         Returns:
             Dictionary containing created task data if successful, None otherwise.
@@ -182,13 +261,23 @@ class DidaClient:
 
         # Validate due date format if provided
         if due_date:
-            # Basic ISO 8601 format validation
+            # ISO 8601 format validation (with optional milliseconds)
             import re
-            iso_pattern = r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$'
+            iso_pattern = r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?[+-]\d{2}:?\d{2}$'
             if not re.match(iso_pattern, due_date):
                 raise ValueError(
                     f"Invalid due_date format: {due_date}. "
-                    "Expected ISO 8601 format: YYYY-MM-DDTHH:MM:SS±HH:MM"
+                    "Expected ISO 8601 format: YYYY-MM-DDTHH:MM:SS[.sss]±HH:MM"
+                )
+
+        # Validate start date format if provided
+        if start_date:
+            import re
+            iso_pattern = r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?[+-]\d{2}:?\d{2}$'
+            if not re.match(iso_pattern, start_date):
+                raise ValueError(
+                    f"Invalid start_date format: {start_date}. "
+                    "Expected ISO 8601 format: YYYY-MM-DDTHH:MM:SS[.sss]±HH:MM"
                 )
 
         target_project_id = project_id or self.inbox_id
@@ -213,8 +302,16 @@ class DidaClient:
         # Add due date and timezone if provided
         if due_date:
             payload["dueDate"] = due_date
-            # Use provided timezone or default
-            payload["timeZone"] = time_zone or "Asia/Shanghai"
+
+        # Add timezone if provided
+        if time_zone:
+            payload["timeZone"] = time_zone
+        elif due_date:
+            payload["timeZone"] = "Asia/Shanghai"
+
+        # Add start date if provided
+        if start_date:
+            payload["startDate"] = start_date
 
         try:
             response = self.session.post(url, json=payload)
@@ -261,9 +358,13 @@ class DidaClient:
         """
         url = f"{self.base_url}/task/{task_id}"
         try:
-            response = self.session.put(url, json=kwargs)
+            response = self.session.post(url, json=kwargs)
             response.raise_for_status()
-            return response.json()
+            # Handle empty response (200 with no body means success)
+            if response.text:
+                return response.json()
+            else:
+                return {"status": "success", "taskId": task_id}
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to update task {task_id}: {e}")
             return None

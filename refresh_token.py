@@ -149,9 +149,10 @@ def exchange_code_for_token(authorization_code: str) -> Optional[Dict[str, Any]]
         if response.status_code == 200:
             token_data = response.json()
 
-            # Add expiration timestamp
+            # Add expiration timestamp (ticktick library expects 'expire_time')
             if 'expires_in' in token_data:
                 token_data['expires_at'] = time.time() + token_data['expires_in']
+                token_data['expire_time'] = token_data['expires_at']
 
             return token_data
         else:
@@ -173,7 +174,7 @@ def exchange_code_for_token(authorization_code: str) -> Optional[Dict[str, Any]]
 
 
 def save_token(token_data: Dict[str, Any], token_file: str = DEFAULT_TOKEN_FILE) -> bool:
-    """Save token data to file.
+    """Save token data to file (JSON format for CacheHandler compatibility).
 
     Args:
         token_data: Token data dictionary.
@@ -183,8 +184,9 @@ def save_token(token_data: Dict[str, Any], token_file: str = DEFAULT_TOKEN_FILE)
         True if saved successfully, False otherwise.
     """
     try:
-        with open(token_file, 'wb') as f:
-            pickle.dump(token_data, f)
+        with open(token_file, 'w', encoding='utf-8') as f:
+            import json
+            json.dump(token_data, f)
 
         logger.info(f"Access token saved to {token_file}")
         logger.info(f"Token expires at: {time.ctime(token_data.get('expires_at', 0))}")
